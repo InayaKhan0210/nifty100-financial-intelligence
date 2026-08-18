@@ -1,65 +1,119 @@
 from pathlib import Path
+
 from src.etl.loader import load_core_datasets
 
 OUTPUT_PATH = Path("data/processed")
 OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
 
+datasets = load_core_datasets()
 
-def calculate_net_profit_margin():
-    """
-    Calculate Net Profit Margin (NPM)
-    and compare it with the dataset values.
-    """
+pnl = datasets["profitandloss"]
+ratios = datasets["financial_ratios"]
 
-    datasets = load_core_datasets()
+# Keep only the required columns
+pnl = pnl[
+    [
+        "company_id",
+        "year",
+        "sales",
+        "net_profit",
+    ]
+].copy()
 
-    pnl = datasets["profitandloss"].copy()
+ratios = ratios[
+    [
+        "company_id",
+        "year",
+        "net_profit_margin_pct",
+    ]
+].copy()
 
-    # Calculate Net Profit Margin
-    pnl["net_profit_margin_calculated"] = (
-        pnl["net_profit"] / pnl["sales"]
-    ) * 100
+# Remove duplicate company/year records before merging
+pnl = pnl.drop_duplicates(subset=["company_id", "year"])
+ratios = ratios.drop_duplicates(subset=["company_id", "year"])
 
-    # Round for comparison
-    pnl["net_profit_margin_calculated"] = (
-        pnl["net_profit_margin_calculated"].round(2)
-    )
+# Merge datasets
+merged = pnl.merge(
+    ratios,
+    on=["company_id", "year"],
+    how="left",
+)
 
-    # If dataset already contains Net Profit Margin, compare it
-    if "net_profit_margin" in pnl.columns:
-        pnl["net_profit_margin_match"] = (
-            pnl["net_profit_margin"].round(2)
-            == pnl["net_profit_margin_calculated"]
-        )
-    else:
-        pnl["net_profit_margin_match"] = "Not Available"
+# Calculate Net Profit Margin
+merged["net_profit_margin_calculated"] = (
+    (merged["net_profit"] / merged["sales"]) * 100
+).round(2)
 
-    return pnl
+merged["net_profit_margin_match"] = (
+    merged["net_profit_margin_calculated"].round(2)
+    == merged["net_profit_margin_pct"].round(2)
+)
 
+# Source data availability
+merged["source_available"] = merged["net_profit_margin_pct"].notna()
 
-if __name__ == "__main__":
+# True mismatch only when source data exists
+merged["validation_status"] = "Source unavailable"
 
-    result = calculate_net_profit_margin()
+merged.loc[
+    merged["source_available"]
+    & merged["net_profit_margin_match"],
+    "validation_status"
+] = "Match"
 
-    result.to_csv(
-        OUTPUT_PATH / "net_profit_margin.csv",
-        index=False
-    )
+merged.loc[
+    merged["source_available"]
+    & ~merged["net_profit_margin_match"],
+    "validation_status"
+] = "Mismatch"
 
+print("\nNet Profit Margin Validation:")
+
+print(
+    merged[
+        [
+            "company_id",
+            "year",
+            "sales",
+            "net_profit",
+            "net_profit_margin_calculated",
+            "net_profit_margin_pct",
+            "net_profit_margin_match",
+        ]
+    ].head(20)
+)
+
+print("\nValidation Summary:")
+print(
+    merged["validation_status"].value_counts()
+)
+
+print("\nActual Mismatches:")
+
+mismatches = merged[
+    merged["validation_status"] == "Mismatch"
+]
+
+print("Mismatch Count:", len(mismatches))
+
+if len(mismatches) > 0:
     print(
-        result[
+        mismatches[
             [
                 "company_id",
                 "year",
-                "sales",
-                "net_profit",
                 "net_profit_margin_calculated",
-                "net_profit_margin_match",
+                "net_profit_margin_pct",
             ]
-        ].head(10)
+        ].head(20)
     )
 
-    print("\n========== Summary ==========")
-    print(f"Total Records : {len(result)}")
+# Save output
+output_file = OUTPUT_PATH / "net_profit_margin.csv"
+merged.to_csv(output_file, index=False)
 
-    print("\nnet_profit_margin.csv created successfully!")
+print(f"\nSaved: {output_file}")
+
+# Summary
+print("\nNet Profit Margin Summary:")
+print(merged["net_profit_margin_calculated"].describe())

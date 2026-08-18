@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from src.etl.loader import load_core_datasets
 
 OUTPUT_PATH = Path("data/processed")
@@ -6,43 +7,86 @@ OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
 
 
 def calculate_operating_profit_margin():
-    """
-    Calculate Operating Profit Margin (OPM)
-    and compare it with the dataset value.
-    """
 
     datasets = load_core_datasets()
 
-    pnl = datasets["profitandloss"].copy()
+    pnl = datasets["profitandloss"]
+    ratios = datasets["financial_ratios"]
 
-    # Calculate OPM
-    pnl["opm_calculated"] = (
-        pnl["operating_profit"] / pnl["sales"]
-    ) * 100
+    # Required columns
+    pnl = pnl[
+        [
+            "company_id",
+            "year",
+            "sales",
+            "operating_profit",
+        ]
+    ].copy()
 
-    # Round to 2 decimal places
-    pnl["opm_calculated"] = pnl["opm_calculated"].round(2)
+    ratios = ratios[
+        [
+            "company_id",
+            "year",
+            "operating_profit_margin_pct",
+        ]
+    ].copy()
 
-    # Compare with dataset value
-    pnl["opm_match"] = (
-        pnl["opm_percentage"].round(2)
-        == pnl["opm_calculated"]
+    # Remove duplicate company/year records
+    pnl = pnl.drop_duplicates(
+        subset=["company_id", "year"]
     )
 
-    return pnl
+    ratios = ratios.drop_duplicates(
+        subset=["company_id", "year"]
+    )
+
+    # Merge with financial ratios
+    merged = pnl.merge(
+        ratios,
+        on=["company_id", "year"],
+        how="left",
+    )
+
+    # Calculate OPM
+    merged["opm_calculated"] = (
+        (merged["operating_profit"] / merged["sales"]) * 100
+    ).round(2)
+
+    # Compare with source
+    merged["opm_match"] = (
+        merged["opm_calculated"].round(2)
+        == merged["operating_profit_margin_pct"].round(2)
+    )
+
+    # Identify whether source exists
+    merged["source_available"] = (
+        merged["operating_profit_margin_pct"].notna()
+    )
+
+    # Validation status
+    merged["validation_status"] = "Source unavailable"
+
+    merged.loc[
+        merged["source_available"]
+        & merged["opm_match"],
+        "validation_status"
+    ] = "Match"
+
+    merged.loc[
+        merged["source_available"]
+        & ~merged["opm_match"],
+        "validation_status"
+    ] = "Mismatch"
+
+    return merged
 
 
 if __name__ == "__main__":
 
     result = calculate_operating_profit_margin()
 
-    # Save results
-    result.to_csv(
-        OUTPUT_PATH / "operating_profit_margin.csv",
-        index=False
-    )
+    print("\nOperating Profit Margin Validation:")
 
-    # Display comparison
     print(
         result[
             [
@@ -50,21 +94,53 @@ if __name__ == "__main__":
                 "year",
                 "sales",
                 "operating_profit",
-                "opm_percentage",
                 "opm_calculated",
-                "opm_match",
+                "operating_profit_margin_pct",
+                "validation_status",
             ]
-        ].head(10)
+        ].head(20)
     )
 
+    print("\nValidation Summary:")
+
+    print(
+        result["validation_status"].value_counts()
+    )
+
+    mismatches = result[
+        result["validation_status"] == "Mismatch"
+    ]
+
+    print("\nActual Mismatches:")
+    print("Mismatch Count:", len(mismatches))
+
+    if len(mismatches) > 0:
+        print(
+            mismatches[
+                [
+                    "company_id",
+                    "year",
+                    "opm_calculated",
+                    "operating_profit_margin_pct",
+                ]
+            ].head(20)
+        )
+
+    # Save output
+    output_file = (
+        OUTPUT_PATH / "operating_profit_margin.csv"
+    )
+
+    result.to_csv(
+        output_file,
+        index=False
+    )
+
+    print(f"\nSaved: {output_file}")
+
     # Summary
-    total_rows = len(result)
-    matched_rows = result["opm_match"].sum()
-    unmatched_rows = total_rows - matched_rows
+    print("\nOperating Profit Margin Summary:")
 
-    print("\n========== Summary ==========")
-    print(f"Total Records     : {total_rows}")
-    print(f"Matched Records   : {matched_rows}")
-    print(f"Unmatched Records : {unmatched_rows}")
-
-    print("\noperating_profit_margin.csv created successfully!")
+    print(
+        result["opm_calculated"].describe()
+    )
